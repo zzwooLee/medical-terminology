@@ -216,7 +216,7 @@ def hybrid_search(query: str):
 st.markdown("""
 <div class="main-header">
     <h1>🏥 의학용어 검색</h1>
-    <p>의학용어 교재 기반 AI 검색 서비스</p>
+    <p>AI 기반 의학용어 검색 서비스</p>
     <small>한국어 · 영어 모두 검색 가능합니다</small>
 </div>
 """, unsafe_allow_html=True)
