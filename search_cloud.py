@@ -337,6 +337,8 @@ if ADMIN_MODE:
         - Reciprocal Rank Fusion 결합
         """)
         st.caption(f"모드: {'🔴 관리자' if ADMIN_MODE else '🟢 일반'}")
+        st.divider()
+        cache_status_placeholder = st.empty()
 else:
     match_count   = DEFAULT_MATCH_COUNT
     vector_weight = DEFAULT_VECTOR_WEIGHT
@@ -345,7 +347,8 @@ else:
 # ── 세션 상태 초기화 ──────────────────────────────────────────────────────────
 for key, val in [("sq", ""), ("explanation", ""), ("related_terms", []), ("results", []),
                  ("abbrev", ""), ("categories", []), ("no_result", False),
-                 ("_last_q", ""), ("highlighted_text", ""), ("kma_term", None)]:
+                 ("_last_q", ""), ("highlighted_text", ""), ("kma_term", None),
+                 ("cache_hit", False)]:
     if key not in st.session_state:
         st.session_state[key] = val
 
@@ -369,11 +372,11 @@ def do_search(q: str):
                 exp, terms, abbrev, categories, highlighted_text = cached
                 kma = kma_lookup(q)
                 _set_result(exp, terms, abbrev, categories, highlighted_text, kma)
-                if ADMIN_MODE:
-                    st.toast("⚡ 캐시에서 불러왔습니다", icon="💾")
+                st.session_state.cache_hit = True
                 return
 
             # ② 캐시 미스 — 하이브리드 검색 + Gemini 호출
+            st.session_state.cache_hit = False
             results = hybrid_search(q, match_count, vector_weight, source_filter)
             if not results:
                 st.session_state.no_result     = True
@@ -438,6 +441,13 @@ with search_container:
 
     if search_btn and query.strip():
         do_search(query)
+
+    # ── 캐시 상태 사이드바 업데이트 (do_search 이후에 반영) ───────────────────
+    if ADMIN_MODE:
+        if st.session_state.get("cache_hit"):
+            cache_status_placeholder.success("💾 캐시에서 불러온 결과")
+        elif st.session_state.get("explanation"):
+            cache_status_placeholder.caption("💡 첫 검색 결과는 DB에 저장되어\n다음 검색부터 즉시 반환됩니다")
 
     # ── 결과 표시 ──────────────────────────────────────────────────────────────
     if st.session_state.no_result:
