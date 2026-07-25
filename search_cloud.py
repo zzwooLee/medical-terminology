@@ -113,15 +113,16 @@ def _call_explanation(gemini_client, query: str, context: str) -> str:
 {context}
 ---
 
-다음 형식으로만 응답하세요. 대괄호 안을 실제 내용으로 채우세요:
+다음 형식으로만 응답하세요. 대괄호 안을 실제 내용으로 채우세요.
+응답에서 "교재", "교재에서", "교재는", "교재에 따르면" 등 교재를 직접 언급하는 표현은 절대 사용하지 마세요.
 
 ## [검색어의 영문 의학용어] / [한글 용어]
 
 **정의**
-[교재 내용에 기반한 정의, 2~3문장]
+[2~3문장으로 정의]
 
 **핵심 개념**
-[교재 내용을 바탕으로 학습에 도움이 되는 핵심 포인트를 3~5개 제시하세요. 각 항목은 단순 나열이 아니라 왜 중요한지, 어떤 맥락에서 사용되는지 포함하여 2~3문장으로 설명하세요.]"""
+[학습에 도움이 되는 핵심 포인트를 3~5개 제시하세요. 각 항목은 단순 나열이 아니라 왜 중요한지, 어떤 맥락에서 사용되는지 포함하여 2~3문장으로 설명하세요.]"""
     ).text.strip()
 
 def _call_terms(gemini_client, query: str, context: str) -> str:
@@ -278,8 +279,8 @@ if ADMIN_MODE:
                                   help="높을수록 의미 기반 검색 강화 (FTS 가중치 = 1 - 이 값)")
         source_filter = st.radio(
             "검색 소스",
-            ["pdf", "all", "kostom"],
-            format_func=lambda x: {"all": "전체", "kostom": "KOSTOM만", "pdf": "교재 PDF만"}[x]
+            ["pdf", "all"],
+            format_func=lambda x: {"all": "전체", "pdf": "교재 PDF만"}[x]
         )
         st.divider()
         st.markdown("""
@@ -454,7 +455,7 @@ if ADMIN_MODE:
 
         | 구성요소 | 내용 |
         |---------|------|
-        | **데이터** | KOSTOM V7.0 (339,181 용어) + 의학용어 교재 PDF (588쪽) + KMA 필수의학용어집 (23,291 용어) |
+        | **데이터** | 의학용어 교재 PDF (588쪽) + KMA 필수의학용어집 (23,291 용어) |
         | **임베딩 모델** | Gemini gemini-embedding-001 (3072차원) |
         | **벡터 DB** | Supabase PostgreSQL + pgvector |
         | **인덱스** | HNSW (m=16, ef_construction=64) |
@@ -480,15 +481,11 @@ if ADMIN_MODE:
         if st.button("📊 DB 통계 조회"):
             with st.spinner("통계 수집 중..."):
                 try:
-                    terms_count  = supabase.table("mediterm_terms").select("*", count="exact").execute()
-                    chunks_count = supabase.table("mediterm_chunks").select("*", count="exact").execute()
-                    pdf_count    = supabase.table("mediterm_pdf_chunks").select("*", count="exact").execute()
-                    kma_count    = supabase.table("kma_terms").select("*", count="exact").execute()
+                    pdf_count = supabase.table("mediterm_pdf_chunks").select("*", count="exact").execute()
+                    kma_count = supabase.table("kma_terms").select("*", count="exact").execute()
 
-                    col1, col2, col3, col4 = st.columns(4)
-                    col1.metric("📋 KOSTOM 용어 수",  f"{terms_count.count:,}")
-                    col2.metric("🔢 KOSTOM 청크 수",  f"{chunks_count.count:,}")
-                    col3.metric("📘 PDF 청크 수",     f"{pdf_count.count:,}")
-                    col4.metric("🏥 KMA 용어 수",     f"{kma_count.count:,}")
+                    col1, col2 = st.columns(2)
+                    col1.metric("📘 PDF 청크 수", f"{pdf_count.count:,}")
+                    col2.metric("🏥 KMA 용어 수", f"{kma_count.count:,}")
                 except Exception as e:
                     st.error(f"통계 조회 오류: {e}")
