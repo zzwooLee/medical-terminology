@@ -1,27 +1,20 @@
 """
-의학용어 RAG 검색 데모 - Streamlit
-Week 13: 검색 데모 구현
-
-[app.py] Streamlit Cloud 배포용
-  - 로컬: C:\\Environment\\.env 파일에서 환경변수 로드
-  - Cloud: st.secrets에서 환경변수 로드 (자동 전환)
+의학용어 RAG 검색 서비스
+Streamlit Cloud 배포용 (일반 사용자)
 """
 
 import streamlit as st
 from google import genai
-from google.genai import types
 from supabase import create_client
 import os
 from dotenv import load_dotenv
-import time
 import urllib.parse
 import re
 
-# ── 환경변수 로드 (로컬: .env / Cloud: st.secrets 자동 전환) ──────────────────
+# ── 환경변수 로드 ─────────────────────────────────────────────────────────────
 load_dotenv(dotenv_path=r"C:\Environment\.env")
 
 def _get(key: str) -> str:
-    """Streamlit Cloud의 st.secrets를 먼저 확인하고, 없으면 os.getenv로 폴백"""
     try:
         val = st.secrets.get(key)
         if val:
@@ -32,7 +25,7 @@ def _get(key: str) -> str:
 
 # ── 페이지 설정 ──────────────────────────────────────────────────────────────
 st.set_page_config(
-    page_title="의학용어 RAG 검색 데모",
+    page_title="의학용어 검색",
     page_icon="🏥",
     layout="wide"
 )
@@ -74,13 +67,12 @@ st.markdown("""
 # ── 클라이언트 초기화 ─────────────────────────────────────────────────────────
 @st.cache_resource
 def init_clients():
-    """Supabase & Gemini 클라이언트 초기화 (캐시)"""
     supabase_url = _get("SUPABASE_URL")
     supabase_key = _get("SUPABASE_SERVICE_KEY") or _get("SUPABASE_ANON_KEY")
     gemini_key   = _get("GEMINI_API_KEY")
 
     if not all([supabase_url, supabase_key, gemini_key]):
-        st.error("⚠️ .env 파일에 SUPABASE_URL, SUPABASE_SERVICE_KEY, GEMINI_API_KEY를 설정하세요.")
+        st.error("서비스 설정 오류가 발생했습니다. 관리자에게 문의하세요.")
         st.stop()
 
     gemini = genai.Client(api_key=gemini_key)
@@ -98,10 +90,8 @@ def get_query_embedding(query: str) -> list[float]:
     )
     return result.embeddings[0].values
 
-
 # ── Gemini 한글 답변 생성 ──────────────────────────────────────────────────────
 def generate_korean_answer(query: str, chunks: list) -> tuple:
-    """한글 설명 + 관련 용어 추출 (두 번 호출)"""
     context = "\n\n".join([c.get("chunk_text", "") for c in chunks[:5]])
 
     # 1차: 한글 설명
@@ -173,7 +163,7 @@ CATEGORY: (의학 분류, 쉼표로 구분, 최대 3개)"""
             cats = line.replace("CATEGORY:", "").strip()
             categories = [c.strip() for c in cats.split(",") if c.strip()]
 
-    # 4차: 원문 하이라이트 (청크 통합 후 단일 원문)
+    # 4차: 원문 하이라이트
     highlighted_text = ""
     if chunks:
         combined = "\n\n".join([c.get('chunk_text', '')[:400] for c in chunks[:5]])
@@ -204,76 +194,45 @@ CATEGORY: (의학 분류, 쉼표로 구분, 최대 3개)"""
 
     return explanation, related_terms[:8], abbrev, categories, highlighted_text
 
-# ── 하이브리드 검색 ───────────────────────────────────────────────────────────
-def hybrid_search(query: str, match_count: int = 10,
-                  vector_weight: float = 0.7, source_filter: str = "all"):
-    """Supabase hybrid_search RPC 호출"""
-    embedding = get_query_embedding(query)
+# ── 하이브리드 검색 (고정 설정) ───────────────────────────────────────────────
+VECTOR_WEIGHT = 0.7
+SOURCE_FILTER = "pdf"
+MATCH_COUNT   = 10
 
+def hybrid_search(query: str):
+    embedding = get_query_embedding(query)
     params = {
         "query_text":      query,
         "query_embedding": embedding,
-        "match_count":     match_count,
-        "vector_weight":   vector_weight,
-        "fts_weight":      round(1.0 - vector_weight, 2)
+        "match_count":     MATCH_COUNT,
+        "vector_weight":   VECTOR_WEIGHT,
+        "fts_weight":      round(1.0 - VECTOR_WEIGHT, 2),
+        "source_filter":   SOURCE_FILTER,
     }
-
-    # 소스 필터 (KOSTOM 또는 PDF 전용)
-    if source_filter != "all":
-        params["source_filter"] = source_filter
-
     response = supabase.rpc("hybrid_search", params).execute()
     return response.data
 
 # ── UI 헤더 ───────────────────────────────────────────────────────────────────
 st.markdown("""
 <div class="main-header">
-    <h1>🏥 의학용어 RAG 검색 데모</h1>
-    <p>KOSTOM V7.0 (339,181개) + 교재 PDF (1,223 chunks) 하이브리드 검색</p>
-    <small>Python · Supabase pgvector · Gemini gemini-embedding-001</small>
+    <h1>🏥 의학용어 검색</h1>
+    <p>의학용어 교재 기반 AI 검색 서비스</p>
+    <small>한국어 · 영어 모두 검색 가능합니다</small>
 </div>
 """, unsafe_allow_html=True)
 
-# ── 사이드바 설정 ─────────────────────────────────────────────────────────────
-with st.sidebar:
-    st.header("⚙️ 검색 설정")
-
-    match_count = st.slider(
-        "검색 결과 수", min_value=5, max_value=30, value=10, step=5
-    )
-
-    vector_weight = st.slider(
-        "벡터 검색 가중치",
-        min_value=0.0, max_value=1.0, value=0.7, step=0.1,
-        help="높을수록 의미 기반 검색 강화 (FTS 가중치 = 1 - 이 값)"
-    )
-
-    source_filter = st.radio(
-        "검색 소스",
-        ["pdf", "all", "kostom"],
-        format_func=lambda x: {"all": "전체", "kostom": "KOSTOM만", "pdf": "교재 PDF만"}[x]
-    )
-
-    st.divider()
-    st.markdown("""
-    **검색 방식:** Hybrid Search (RRF)
-    - 벡터 유사도 (코사인)
-    - Full-Text Search (BM25)
-    - Reciprocal Rank Fusion 결합
-    """)
-
-# ── 검색 탭 ───────────────────────────────────────────────────────────────────
-# ── 세션 상태 초기화 ─────────────────────────────────────────────────────────
-for key, val in [("sq", ""), ("explanation", ""), ("related_terms", []), ("results", []), ("abbrev", ""), ("categories", []), ("no_result", False), ("_last_q", ""), ("highlighted_text", "")]:
+# ── 세션 상태 초기화 ──────────────────────────────────────────────────────────
+for key, val in [("sq", ""), ("explanation", ""), ("related_terms", []), ("results", []),
+                 ("abbrev", ""), ("categories", []), ("no_result", False),
+                 ("_last_q", ""), ("highlighted_text", "")]:
     if key not in st.session_state:
         st.session_state[key] = val
 
 def do_search(q: str):
-    """검색 실행 후 결과를 session_state에 저장"""
     st.session_state.sq = q
     with st.spinner(f"🔍 '{q}' 검색 중..."):
         try:
-            results = hybrid_search(q, match_count, vector_weight, source_filter)
+            results = hybrid_search(q)
             if not results:
                 st.session_state.explanation = ""
                 st.session_state.related_terms = []
@@ -289,10 +248,10 @@ def do_search(q: str):
                 st.session_state.categories = categories
                 st.session_state.highlighted_text = highlighted_text
         except Exception as e:
-            st.session_state.explanation = f"검색 오류: {e}"
+            st.session_state.explanation = "검색 오류가 발생했습니다. 잠시 후 다시 시도해주세요."
             st.session_state.related_terms = []
 
-# ── URL query param으로 용어 태그 클릭 처리 ─────────────────────────────────
+# ── URL query param으로 용어 태그 클릭 처리 ──────────────────────────────────
 if "q" in st.query_params:
     param_q = st.query_params["q"]
     if param_q and param_q != st.session_state._last_q:
@@ -300,64 +259,59 @@ if "q" in st.query_params:
         do_search(param_q)
     del st.query_params["q"]
 
-tab_search, tab_about, tab_stats = st.tabs(["🔍 검색", "ℹ️ 시스템 정보", "📊 통계"])
+# ── 검색 UI ───────────────────────────────────────────────────────────────────
+col1, col2 = st.columns([5, 1])
+with col1:
+    query = st.text_input(
+        "검색어 입력",
+        placeholder="예: 당뇨병, hypertension, 심근경색, pneumonia...",
+        label_visibility="collapsed",
+        value=st.session_state.sq
+    )
+with col2:
+    search_btn = st.button("검색", type="primary", use_container_width=True)
 
-with tab_search:
-    # 검색 입력
-    col1, col2 = st.columns([5, 1])
-    with col1:
-        query = st.text_input(
-            "검색어 입력 (한국어 또는 영어)",
-            placeholder="예: 당뇨병, hypertension, 복통, myocardial infarction...",
-            label_visibility="collapsed",
-            value=st.session_state.sq
-        )
-    with col2:
-        search_btn = st.button("검색", type="primary", use_container_width=True)
+st.caption("예시 검색어:")
+ex_cols = st.columns(5)
+examples = ["당뇨병", "hypertension", "심근경색", "폐렴", "골절"]
+for i, ex in enumerate(examples):
+    if ex_cols[i].button(ex, key=f"ex_{i}"):
+        do_search(ex)
 
-    # 예시 쿼리 버튼
-    st.caption("예시 검색어:")
-    ex_cols = st.columns(5)
-    examples = ["당뇨병", "hypertension", "심근경색", "폐렴", "골절"]
-    for i, ex in enumerate(examples):
-        if ex_cols[i].button(ex, key=f"ex_{i}"):
-            do_search(ex)
+if search_btn and query.strip():
+    do_search(query)
 
-    if search_btn and query.strip():
-        do_search(query)
+# ── 결과 표시 ─────────────────────────────────────────────────────────────────
+if st.session_state.no_result:
+    st.warning("검색 결과가 없습니다. 다른 검색어를 시도해보세요.")
+elif st.session_state.explanation:
+    st.markdown(st.session_state.explanation)
 
-    # ── 결과 표시 ─────────────────────────────────────────────────────────────
-    if st.session_state.no_result:
-        st.warning("검색 결과가 없습니다. 다른 검색어를 시도해보세요.")
-    elif st.session_state.explanation:
-        st.markdown(st.session_state.explanation)
+    if st.session_state.abbrev or st.session_state.categories:
+        badges_html = '<div style="margin:8px 0 16px 0;">'
+        badges_html += '<span style="font-size:13px;color:#6B7280;margin-right:8px;">약어 / 분류</span>'
+        if st.session_state.abbrev:
+            badges_html += f'<span style="background:#DBEAFE;color:#1E40AF;padding:4px 12px;border-radius:20px;font-size:13px;font-weight:500;margin:3px;">약어: {st.session_state.abbrev}</span>'
+        for cat in st.session_state.categories:
+            badges_html += f'<span style="background:#D1FAE5;color:#065F46;padding:4px 12px;border-radius:20px;font-size:13px;font-weight:500;margin:3px;">{cat}</span>'
+        badges_html += '</div>'
+        st.markdown(badges_html, unsafe_allow_html=True)
 
-        # ── 약어 / 분류 배지 ──────────────────────────────────────────
-        if st.session_state.abbrev or st.session_state.categories:
-            badges_html = '<div style="margin:8px 0 16px 0;">'
-            badges_html += '<span style="font-size:13px;color:#6B7280;margin-right:8px;">약어 / 분류</span>'
-            if st.session_state.abbrev:
-                badges_html += f'<span style="background:#DBEAFE;color:#1E40AF;padding:4px 12px;border-radius:20px;font-size:13px;font-weight:500;margin:3px;">약어: {st.session_state.abbrev}</span>'
-            for cat in st.session_state.categories:
-                badges_html += f'<span style="background:#D1FAE5;color:#065F46;padding:4px 12px;border-radius:20px;font-size:13px;font-weight:500;margin:3px;">{cat}</span>'
-            badges_html += '</div>'
-            st.markdown(badges_html, unsafe_allow_html=True)
+    if st.session_state.related_terms:
+        st.markdown("**관련 용어**")
+        tags_html = '<div style="display:flex;flex-wrap:wrap;gap:4px;margin:6px 0;">'
+        for i, term in enumerate(st.session_state.related_terms[:8]):
+            en = urllib.parse.quote(term.get('en', ''))
+            label = f"{term.get('en', '')} / {term.get('ko', '')}"
+            tags_html += f'<a href="?q={en}" target="_self" class="term-tag tag-{i % 8}">{label}</a>'
+        tags_html += '</div>'
+        st.markdown(tags_html, unsafe_allow_html=True)
+        st.caption("💡 태그 클릭 시 해당 용어 바로 검색 가능")
 
-        if st.session_state.related_terms:
-            st.markdown("**관련 용어**")
-            tags_html = '<div style="display:flex;flex-wrap:wrap;gap:4px;margin:6px 0;">'
-            for i, term in enumerate(st.session_state.related_terms[:8]):
-                en = urllib.parse.quote(term.get('en', ''))
-                label = f"{term.get('en', '')} / {term.get('ko', '')}"
-                tags_html += f'<a href="?q={en}" target="_self" class="term-tag tag-{i % 8}">{label}</a>'
-            tags_html += '</div>'
-            st.markdown(tags_html, unsafe_allow_html=True)
-            st.caption("💡 태그 클릭 시 해당 용어 바로 검색 가능")
-
-        if st.session_state.highlighted_text:
-            with st.expander("📄 원문 보기", expanded=False):
-                st.markdown(
-                    f'''<div style="background:#F8FAFC;border:1px solid #E2E8F0;border-radius:8px;padding:1rem;font-size:14px;line-height:1.9;">
+    if st.session_state.highlighted_text:
+        with st.expander("📄 원문 보기", expanded=False):
+            st.markdown(
+                f'''<div style="background:#F8FAFC;border:1px solid #E2E8F0;border-radius:8px;padding:1rem;font-size:14px;line-height:1.9;">
 {st.session_state.highlighted_text}
 </div>
 <div style="display:flex;gap:16px;margin-top:10px;font-size:12px;color:#6B7280;">
@@ -365,51 +319,5 @@ with tab_search:
   <span><span style="background:#D4EDDA;color:#155724;border-radius:3px;padding:1px 8px;margin-right:4px;">■</span>병태생리</span>
   <span><span style="background:#CCE5FF;color:#004085;border-radius:3px;padding:1px 8px;margin-right:4px;">■</span>핵심 용어</span>
 </div>''',
-                    unsafe_allow_html=True
-                )
-
-        st.divider()
-
-    # (빈 except 블록 자리 유지)
-    if False:
-        pass
-
-with tab_about:
-    st.markdown("""
-    ### 시스템 구성
-
-    | 구성요소 | 내용 |
-    |---------|------|
-    | **데이터** | KOSTOM V7.0 (339,181 용어) + 의학용어 교재 PDF (588쪽) |
-    | **임베딩 모델** | Gemini gemini-embedding-001 (3072차원) |
-    | **벡터 DB** | Supabase PostgreSQL + pgvector |
-    | **인덱스** | HNSW (m=16, ef_construction=64) |
-    | **검색 방식** | Hybrid Search = 벡터(코사인) + FTS, RRF 결합 |
-    | **프론트엔드** | Streamlit |
-    | **배포** | Streamlit Cloud (무료) |
-
-    ### 검색 파이프라인
-    ```
-    사용자 입력 → Gemini embed_content(RETRIEVAL_QUERY)
-                → Supabase hybrid_search RPC
-                    ├─ 벡터 검색 (top-100, cosine similarity)
-                    └─ Full-Text Search (top-100, tsvector)
-                → RRF 융합 (1/(k+rank), k=60)
-                → 상위 N개 반환
-    ```
-    """)
-
-with tab_stats:
-    if st.button("📊 DB 통계 조회"):
-        with st.spinner("통계 수집 중..."):
-            try:
-                terms_count = supabase.table("mediterm_terms").select("*", count="exact").execute()
-                chunks_count = supabase.table("mediterm_chunks").select("*", count="exact").execute()
-                pdf_count = supabase.table("mediterm_pdf_chunks").select("*", count="exact").execute()
-
-                col1, col2, col3 = st.columns(3)
-                col1.metric("📋 KOSTOM 용어 수", f"{terms_count.count:,}")
-                col2.metric("🔢 KOSTOM 청크 수", f"{chunks_count.count:,}")
-                col3.metric("📘 PDF 청크 수", f"{pdf_count.count:,}")
-            except Exception as e:
-                st.er
+                unsafe_allow_html=True
+            )
