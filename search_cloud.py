@@ -15,6 +15,7 @@ from dotenv import load_dotenv
 import urllib.parse
 import re
 from concurrent.futures import ThreadPoolExecutor, as_completed
+import json
 
 # ── 환경변수 로드 ─────────────────────────────────────────────────────────────
 load_dotenv(dotenv_path=r"C:\Environment\.env")
@@ -226,6 +227,52 @@ def generate_korean_answer(query: str, chunks_json: str, match_count: int = 10) 
 
     return explanation, related_terms[:8], abbrev, categories, highlighted_text
 
+# ── DB 검색 캐시 ─────────────────────────────────────────────────────────────
+def cache_lookup(query: str) -> tuple | None:
+    """DB에서 캐시된 검색 결과 조회 (대소문자 무시). 히트 시 hit_count 증가."""
+    try:
+        result = supabase.table("search_cache") \
+            .select("explanation,related_terms,abbrev,categories,highlighted_text") \
+            .eq("query_lower", query.lower().strip()) \
+            .limit(1).execute()
+        if result.data:
+            row = result.data[0]
+            # hit_count 증가 — 백그라운드 실행 (응답 속도에 영향 없음)
+            def _inc():
+                try:
+                    supabase.rpc("increment_search_hit",
+                                 {"q_lower": query.lower().strip()}).execute()
+                except Exception:
+                    pass
+            ThreadPoolExecutor(max_workers=1).submit(_inc)
+            return (
+                row["explanation"],
+                row["related_terms"] or [],
+                row["abbrev"] or "",
+                row["categories"] or [],
+                row["highlighted_text"] or ""
+            )
+    except Exception:
+        pass
+    return None
+
+def cache_save(query: str, explanation: str, related_terms: list,
+               abbrev: str, categories: list, highlighted_text: str) -> None:
+    """검색 결과를 DB에 저장. 동일 검색어가 있으면 덮어씀."""
+    try:
+        supabase.table("search_cache").upsert({
+            "query":            query.strip(),
+            "query_lower":      query.lower().strip(),
+            "explanation":      explanation,
+            "related_terms":    related_terms,
+            "abbrev":           abbrev,
+            "categories":       categories,
+            "highlighted_text": highlighted_text,
+            "hit_count":        1,
+        }, on_conflict="query_lower").execute()
+    except Exception:
+        pass
+
 # ── KMA 공식 용어 조회 ────────────────────────────────────────────────────────
 def kma_lookup(term: str) -> dict | None:
     try:
@@ -302,34 +349,53 @@ for key, val in [("sq", ""), ("explanation", ""), ("related_terms", []), ("resul
     if key not in st.session_state:
         st.session_state[key] = val
 
+def _set_result(exp, terms, abbrev, categories, highlighted_text, kma, results=None):
+    st.session_state.no_result        = False
+    st.session_state.explanation      = exp
+    st.session_state.related_terms    = terms
+    st.session_state.abbrev           = abbrev
+    st.session_state.categories       = categories
+    st.session_state.highlighted_text = highlighted_text
+    st.session_state.kma_term         = kma
+    st.session_state.results          = results or []
+
 def do_search(q: str):
-    import json
     st.session_state.sq = q
     with st.spinner(f"🔍 '{q}' 검색 중..."):
         try:
+            # ① DB 캐시 확인 — 히트 시 AI 호출 없이 즉시 반환
+            cached = cache_lookup(q)
+            if cached:
+                exp, terms, abbrev, categories, highlighted_text = cached
+                kma = kma_lookup(q)
+                _set_result(exp, terms, abbrev, categories, highlighted_text, kma)
+                if ADMIN_MODE:
+                    st.toast("⚡ 캐시에서 불러왔습니다", icon="💾")
+                return
+
+            # ② 캐시 미스 — 하이브리드 검색 + Gemini 호출
             results = hybrid_search(q, match_count, vector_weight, source_filter)
             if not results:
-                st.session_state.no_result = True
-                st.session_state.explanation = ""
+                st.session_state.no_result     = True
+                st.session_state.explanation   = ""
                 st.session_state.related_terms = []
-                st.session_state.results = []
-                st.session_state.kma_term = None
+                st.session_state.results       = []
+                st.session_state.kma_term      = None
             else:
-                st.session_state.no_result = False
-                st.session_state.results = results
-                # KMA 조회와 Gemini 호출을 병렬 실행
                 with ThreadPoolExecutor(max_workers=2) as executor:
                     chunks_json = json.dumps(results)
                     f_gemini = executor.submit(generate_korean_answer, q, chunks_json, match_count)
                     f_kma    = executor.submit(kma_lookup, q)
                     exp, terms, abbrev, categories, highlighted_text = f_gemini.result()
                     kma = f_kma.result()
-                st.session_state.explanation     = exp
-                st.session_state.related_terms   = terms
-                st.session_state.abbrev          = abbrev
-                st.session_state.categories      = categories
-                st.session_state.highlighted_text = highlighted_text
-                st.session_state.kma_term        = kma
+
+                _set_result(exp, terms, abbrev, categories, highlighted_text, kma, results)
+
+                # ③ 결과를 DB에 저장 (백그라운드)
+                ThreadPoolExecutor(max_workers=1).submit(
+                    cache_save, q, exp, terms, abbrev, categories, highlighted_text
+                )
+
         except Exception as e:
             err = str(e) if ADMIN_MODE else "검색 오류가 발생했습니다. 잠시 후 다시 시도해주세요."
             st.session_state.explanation   = err
