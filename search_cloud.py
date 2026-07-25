@@ -308,16 +308,3 @@ elif st.session_state.explanation:
         st.markdown(tags_html, unsafe_allow_html=True)
         st.caption("💡 태그 클릭 시 해당 용어 바로 검색 가능")
 
-    if st.session_state.highlighted_text:
-        with st.expander("📄 원문 보기", expanded=False):
-            st.markdown(
-                f'''<div style="background:#F8FAFC;border:1px solid #E2E8F0;border-radius:8px;padding:1rem;font-size:14px;line-height:1.9;">
-{st.session_state.highlighted_text}
-</div>
-<div style="display:flex;gap:16px;margin-top:10px;font-size:12px;color:#6B7280;">
-  <span><span style="background:#FFF3B0;color:#7A5C00;border-radius:3px;padding:1px 8px;margin-right:4px;">■</span>검색어</span>
-  <span><span style="background:#D4EDDA;color:#155724;border-radius:3px;padding:1px 8px;margin-right:4px;">■</span>병태생리</span>
-  <span><span style="background:#CCE5FF;color:#004085;border-radius:3px;padding:1px 8px;margin-right:4px;">■</span>핵심 용어</span>
-</div>''',
-                unsafe_allow_html=True
-            )
