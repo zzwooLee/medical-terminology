@@ -194,6 +194,29 @@ CATEGORY: (의학 분류, 쉼표로 구분, 최대 3개)"""
 
     return explanation, related_terms[:8], abbrev, categories, highlighted_text
 
+# ── KMA 공식 용어 조회 ───────────────────────────────────────────────────────
+def kma_lookup(term: str) -> dict | None:
+    """대한의사협회 필수의학용어집에서 공식 한글/영어 용어 조회"""
+    try:
+        # 영어로 조회
+        result = supabase.table("kma_terms") \
+            .select("en,ko") \
+            .ilike("en", term) \
+            .limit(1).execute()
+        if result.data:
+            return result.data[0]
+        # 한글로 조회
+        result = supabase.table("kma_terms") \
+            .select("ko,en") \
+            .ilike("ko", term) \
+            .limit(1).execute()
+        if result.data:
+            return result.data[0]
+    except Exception:
+        pass
+    return None
+
+
 # ── 하이브리드 검색 (고정 설정) ───────────────────────────────────────────────
 VECTOR_WEIGHT = 0.7
 SOURCE_FILTER = "pdf"
@@ -224,7 +247,7 @@ st.markdown("""
 # ── 세션 상태 초기화 ──────────────────────────────────────────────────────────
 for key, val in [("sq", ""), ("explanation", ""), ("related_terms", []), ("results", []),
                  ("abbrev", ""), ("categories", []), ("no_result", False),
-                 ("_last_q", ""), ("highlighted_text", "")]:
+                 ("_last_q", ""), ("highlighted_text", ""), ("kma_term", None)]:
     if key not in st.session_state:
         st.session_state[key] = val
 
@@ -238,6 +261,7 @@ def do_search(q: str):
                 st.session_state.related_terms = []
                 st.session_state.results = []
                 st.session_state.no_result = True
+                st.session_state.kma_term = None
             else:
                 st.session_state.no_result = False
                 st.session_state.results = results
@@ -247,9 +271,12 @@ def do_search(q: str):
                 st.session_state.abbrev = abbrev
                 st.session_state.categories = categories
                 st.session_state.highlighted_text = highlighted_text
+                # KMA 공식 용어 조회
+                st.session_state.kma_term = kma_lookup(q)
         except Exception as e:
             st.session_state.explanation = "검색 오류가 발생했습니다. 잠시 후 다시 시도해주세요."
             st.session_state.related_terms = []
+            st.session_state.kma_term = None
 
 # ── URL query param으로 용어 태그 클릭 처리 ──────────────────────────────────
 if "q" in st.query_params:
@@ -285,6 +312,21 @@ if search_btn and query.strip():
 if st.session_state.no_result:
     st.warning("검색 결과가 없습니다. 다른 검색어를 시도해보세요.")
 elif st.session_state.explanation:
+    # KMA 공식 용어 배지
+    if st.session_state.kma_term:
+        kma = st.session_state.kma_term
+        en_disp = kma.get('en', '')
+        ko_disp = kma.get('ko', '')
+        st.markdown(
+            f'<div style="background:#EFF6FF;border:1px solid #BFDBFE;border-radius:8px;'
+            f'padding:10px 16px;margin-bottom:16px;display:flex;align-items:center;gap:10px;">'
+            f'<span style="background:#1D4ED8;color:white;font-size:11px;font-weight:700;'
+            f'padding:2px 8px;border-radius:4px;">대한의사협회 공식</span>'
+            f'<span style="font-size:14px;color:#1E3A8A;font-weight:600;">'
+            f'{en_disp} &nbsp;·&nbsp; {ko_disp}</span>'
+            f'</div>',
+            unsafe_allow_html=True
+        )
     st.markdown(st.session_state.explanation)
 
     if st.session_state.abbrev or st.session_state.categories:
