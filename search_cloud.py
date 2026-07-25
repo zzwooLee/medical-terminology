@@ -347,10 +347,13 @@ else:
 # ── 세션 상태 초기화 ──────────────────────────────────────────────────────────
 for key, val in [("sq", ""), ("explanation", ""), ("related_terms", []), ("results", []),
                  ("abbrev", ""), ("categories", []), ("no_result", False),
-                 ("_last_q", ""), ("highlighted_text", ""), ("kma_term", None),
-                 ("cache_hit", False)]:
+                 ("not_medical", False), ("_last_q", ""), ("highlighted_text", ""),
+                 ("kma_term", None), ("cache_hit", False)]:
     if key not in st.session_state:
         st.session_state[key] = val
+
+# 의학용어 판별 RRF 점수 임계값
+RRF_THRESHOLD = 0.01
 
 def _set_result(exp, terms, abbrev, categories, highlighted_text, kma, results=None):
     st.session_state.no_result        = False
@@ -377,20 +380,33 @@ def do_search(q: str):
 
             # ② 캐시 미스 — 하이브리드 검색 + Gemini 호출
             st.session_state.cache_hit = False
-            results = hybrid_search(q, match_count, vector_weight, source_filter)
-            if not results:
-                st.session_state.no_result     = True
+
+            # KMA 조회와 하이브리드 검색을 병렬 실행
+            with ThreadPoolExecutor(max_workers=2) as executor:
+                f_search = executor.submit(hybrid_search, q, match_count, vector_weight, source_filter)
+                f_kma_pre = executor.submit(kma_lookup, q)
+                results   = f_search.result()
+                kma_pre   = f_kma_pre.result()
+
+            top_score = results[0].get("rrf_score", 0) if results else 0
+            st.session_state.top_score = top_score
+
+            # KMA 용어집에 있으면 의학용어로 확정 → 임계값 체크 건너뜀
+            is_medical = bool(kma_pre) or (results and top_score >= RRF_THRESHOLD)
+
+            if not is_medical:
+                st.session_state.no_result     = False
+                st.session_state.not_medical   = True
                 st.session_state.explanation   = ""
                 st.session_state.related_terms = []
                 st.session_state.results       = []
                 st.session_state.kma_term      = None
             else:
-                with ThreadPoolExecutor(max_workers=2) as executor:
-                    chunks_json = json.dumps(results)
-                    f_gemini = executor.submit(generate_korean_answer, q, chunks_json, match_count)
-                    f_kma    = executor.submit(kma_lookup, q)
-                    exp, terms, abbrev, categories, highlighted_text = f_gemini.result()
-                    kma = f_kma.result()
+                st.session_state.not_medical   = False
+                chunks_json = json.dumps(results)
+                exp, terms, abbrev, categories, highlighted_text = generate_korean_answer(
+                    q, chunks_json, match_count)
+                kma = kma_pre
 
                 _set_result(exp, terms, abbrev, categories, highlighted_text, kma, results)
 
@@ -450,7 +466,11 @@ with search_container:
             cache_status_placeholder.caption("💡 첫 검색 결과는 DB에 저장되어\n다음 검색부터 즉시 반환됩니다")
 
     # ── 결과 표시 ──────────────────────────────────────────────────────────────
-    if st.session_state.no_result:
+    if st.session_state.not_medical:
+        st.warning(f"**'{st.session_state.sq}'** 은(는) 의학용어 데이터베이스에서 찾을 수 없습니다. 의학용어로 다시 검색해보세요.")
+        if ADMIN_MODE:
+            st.caption(f"최고 RRF 점수: {st.session_state.get('top_score', 0):.4f} (임계값: {RRF_THRESHOLD})")
+    elif st.session_state.no_result:
         st.warning("검색 결과가 없습니다. 다른 검색어를 시도해보세요.")
     elif st.session_state.explanation:
         # KMA 공식 용어 배지
