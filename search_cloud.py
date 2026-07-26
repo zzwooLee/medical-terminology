@@ -105,17 +105,25 @@ def get_query_embedding(query: str) -> list[float]:
 def _call_explanation(gemini_client, query: str, context: str) -> str:
     return gemini_client.models.generate_content(
         model="gemini-2.5-flash",
-        contents=f"""아래 의학 교재 내용만을 근거로 검색어에 대해 한국어로 정리하세요.
-교재에 없는 내용은 추가하지 마세요.
+        contents=f"""검색어가 의학사전·의학교과서에 공식 용어로 등재될 수 있는 임상 의학용어인지 판단하세요.
 
 검색어: {query}
+
+판단 기준:
+- 의학용어 ○: 질환명(당뇨병, pneumonia), 증상(두통, dyspnea), 해부학 구조(대동맥, femur), 약물, 시술, 검사명 등 의학사전에 등재되는 전문용어
+- 의학용어 ✕: 일상어(마음, 건강, 몸, 삶), 인명, 지명, 의학과 막연히 연관된 일반 개념
+
+의학용어가 아니라면 "NOT_MEDICAL" 한 단어만 응답하고 종료하세요.
+
+의학용어가 맞다면, 아래 의학 교재 내용만을 근거로 한국어로 정리하세요.
+교재에 없는 내용은 추가하지 마세요.
+응답에서 "교재", "교재에서", "교재는", "교재에 따르면" 등 교재를 직접 언급하는 표현은 절대 사용하지 마세요.
 
 --- 교재 내용 ---
 {context}
 ---
 
 다음 형식으로만 응답하세요. 대괄호 안을 실제 내용으로 채우세요.
-응답에서 "교재", "교재에서", "교재는", "교재에 따르면" 등 교재를 직접 언급하는 표현은 절대 사용하지 마세요.
 
 ## [검색어의 영문 의학용어] / [한글 용어]
 
@@ -365,7 +373,8 @@ else:
 for key, val in [("sq", ""), ("explanation", ""), ("related_terms", []), ("results", []),
                  ("abbrev", ""), ("categories", []), ("no_result", False),
                  ("not_medical", False), ("_last_q", ""), ("highlighted_text", ""),
-                 ("kma_term", None), ("cache_hit", False)]:
+                 ("kma_term", None), ("cache_hit", False), ("search_input", ""),
+                 ("_pending_input", "")]:
     if key not in st.session_state:
         st.session_state[key] = val
 
@@ -374,6 +383,7 @@ RRF_THRESHOLD = 0.01
 
 def _set_result(exp, terms, abbrev, categories, highlighted_text, kma, results=None):
     st.session_state.no_result        = False
+    st.session_state.not_medical      = False
     st.session_state.explanation      = exp
     st.session_state.related_terms    = terms
     st.session_state.abbrev           = abbrev
@@ -390,6 +400,14 @@ def do_search(q: str):
             cached = cache_lookup(q)
             if cached:
                 exp, terms, abbrev, categories, highlighted_text = cached
+                # 캐시 결과도 NOT_MEDICAL 마커 체크 (과거 잘못 저장된 경우 대비)
+                if exp.strip().upper() == "NOT_MEDICAL":
+                    st.session_state.not_medical   = True
+                    st.session_state.no_result     = False
+                    st.session_state.explanation   = ""
+                    st.session_state.related_terms = []
+                    st.session_state.kma_term      = None
+                    return
                 kma = kma_lookup(q)
                 _set_result(exp, terms, abbrev, categories, highlighted_text, kma)
                 st.session_state.cache_hit = True
@@ -419,12 +437,22 @@ def do_search(q: str):
                 st.session_state.results       = []
                 st.session_state.kma_term      = None
             else:
-                st.session_state.not_medical   = False
                 chunks_json = json.dumps(results)
                 exp, terms, abbrev, categories, highlighted_text = generate_korean_answer(
                     q, chunks_json, match_count)
-                kma = kma_pre
 
+                # Gemini가 의학용어가 아니라고 판단한 경우
+                if exp.strip().upper() == "NOT_MEDICAL":
+                    st.session_state.not_medical   = True
+                    st.session_state.no_result     = False
+                    st.session_state.explanation   = ""
+                    st.session_state.related_terms = []
+                    st.session_state.results       = []
+                    st.session_state.kma_term      = None
+                    return
+
+                st.session_state.not_medical   = False
+                kma = kma_pre
                 _set_result(exp, terms, abbrev, categories, highlighted_text, kma, results)
 
                 # ③ 결과를 DB에 저장 (백그라운드)
@@ -443,6 +471,7 @@ if "q" in st.query_params:
     param_q = st.query_params["q"]
     if param_q and param_q != st.session_state._last_q:
         st.session_state._last_q = param_q
+        st.session_state.search_input = param_q
         do_search(param_q)
     del st.query_params["q"]
 
@@ -456,11 +485,15 @@ else:
 with search_container:
     col1, col2 = st.columns([5, 1])
     with col1:
+        # 예시 버튼 클릭 시 위젯 생성 전에 값을 주입 (위젯 등록 후 직접 수정 불가)
+        if st.session_state._pending_input:
+            st.session_state.search_input = st.session_state._pending_input
+            st.session_state._pending_input = ""
         query = st.text_input(
             "검색어 입력",
             placeholder="예: 당뇨병, hypertension, 심근경색, pneumonia...",
             label_visibility="collapsed",
-            value=st.session_state.sq
+            key="search_input"
         )
     with col2:
         search_btn = st.button("검색", type="primary", use_container_width=True)
@@ -470,7 +503,9 @@ with search_container:
     examples = ["당뇨병", "hypertension", "심근경색", "폐렴", "골절"]
     for i, ex in enumerate(examples):
         if ex_cols[i].button(ex, key=f"ex_{i}"):
-            do_search(ex)
+            st.session_state._pending_input = ex
+            st.session_state.sq = ""  # 검색 트리거 조건 초기화
+            st.rerun()
 
     # 버튼 클릭 또는 Enter(query 변경 감지) 시 검색 실행
     if query.strip() and (search_btn or query.strip() != st.session_state.sq):
@@ -485,9 +520,27 @@ with search_container:
 
     # ── 결과 표시 ──────────────────────────────────────────────────────────────
     if st.session_state.not_medical:
-        st.warning(f"**'{st.session_state.sq}'** 은(는) 의학용어 데이터베이스에서 찾을 수 없습니다. 의학용어로 다시 검색해보세요.")
-        if ADMIN_MODE:
-            st.caption(f"최고 RRF 점수: {st.session_state.get('top_score', 0):.4f} (임계값: {RRF_THRESHOLD})")
+        score = st.session_state.get('top_score', 0)
+        admin_badge = (
+            f'<div style="margin-top:8px;">'
+            f'<span style="display:inline-block;font-size:11px;font-family:monospace;'
+            f'background:#FFFFFF;border:1px solid #D97706;'
+            f'border-radius:4px;padding:2px 8px;color:#92400E;">'
+            f'RRF 점수 {score:.4f} / 임계값 {RRF_THRESHOLD} 미달</span>'
+            f'</div>'
+        ) if ADMIN_MODE else ""
+        st.markdown(
+            f'<div style="background:#FFFBEB;border:1px solid #FCD34D;border-radius:6px;padding:12px 16px;'
+            f'display:flex;gap:8px;align-items:flex-start;">'
+            f'<span style="font-size:16px;line-height:1.5;flex-shrink:0;">⚠️</span>'
+            f'<div>'
+            f'<div style="color:#92400E;font-weight:500;"><strong>\'{st.session_state.sq}\'</strong> 은(는) 의학용어 데이터베이스에서 찾을 수 없습니다.</div>'
+            f'<div style="color:#B45309;margin-top:3px;">의학용어로 다시 검색해보세요.</div>'
+            f'{admin_badge}'
+            f'</div>'
+            f'</div>',
+            unsafe_allow_html=True
+        )
     elif st.session_state.no_result:
         st.warning("검색 결과가 없습니다. 다른 검색어를 시도해보세요.")
     elif st.session_state.explanation:
