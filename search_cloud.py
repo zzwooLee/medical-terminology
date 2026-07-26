@@ -472,7 +472,8 @@ with search_container:
         if ex_cols[i].button(ex, key=f"ex_{i}"):
             do_search(ex)
 
-    if search_btn and query.strip():
+    # 버튼 클릭 또는 Enter(query 변경 감지) 시 검색 실행
+    if query.strip() and (search_btn or query.strip() != st.session_state.sq):
         do_search(query)
 
     # ── 캐시 상태 사이드바 업데이트 (do_search 이후에 반영) ───────────────────
