@@ -228,20 +228,34 @@ def generate_korean_answer(query: str, chunks_json: str, match_count: int = 10) 
     return explanation, related_terms[:8], abbrev, categories, highlighted_text
 
 # ── DB 검색 캐시 ─────────────────────────────────────────────────────────────
+def _parse_alias(explanation: str) -> tuple[str, str]:
+    """explanation 첫 줄(## 영문 / 한글)에서 영문·한글 용어를 추출.
+    영문에서 괄호 안 약어(예: Hypertension (HTN))는 제거."""
+    match = re.search(r'^##\s+(.+?)\s*/\s*(.+?)$', explanation, re.MULTILINE)
+    if match:
+        en = re.sub(r'\s*\([^)]+\)', '', match.group(1)).strip().lower()
+        ko = re.sub(r'\s*\([^)]+\)', '', match.group(2)).strip()
+        return en, ko
+    return "", ""
+
 def cache_lookup(query: str) -> tuple | None:
-    """DB에서 캐시된 검색 결과 조회 (대소문자 무시). 히트 시 hit_count 증가."""
+    """DB에서 캐시된 검색 결과 조회.
+    query_lower, query_en, query_ko, query_abbrev 중 하나라도 일치하면 히트."""
     try:
+        q = query.lower().strip()
+        # query_lower, query_en, query_ko, abbrev(ilike) 에서 OR 조회
         result = supabase.table("search_cache") \
-            .select("explanation,related_terms,abbrev,categories,highlighted_text") \
-            .eq("query_lower", query.lower().strip()) \
+            .select("explanation,related_terms,abbrev,categories,highlighted_text,query_lower") \
+            .or_(f"query_lower.eq.{q},query_en.eq.{q},query_ko.eq.{q},abbrev.ilike.{q}") \
             .limit(1).execute()
         if result.data:
             row = result.data[0]
-            # hit_count 증가 — 백그라운드 실행 (응답 속도에 영향 없음)
+            # hit_count 증가 — 백그라운드 실행
+            matched_lower = row["query_lower"]
             def _inc():
                 try:
                     supabase.rpc("increment_search_hit",
-                                 {"q_lower": query.lower().strip()}).execute()
+                                 {"q_lower": matched_lower}).execute()
                 except Exception:
                     pass
             ThreadPoolExecutor(max_workers=1).submit(_inc)
@@ -258,12 +272,15 @@ def cache_lookup(query: str) -> tuple | None:
 
 def cache_save(query: str, explanation: str, related_terms: list,
                abbrev: str, categories: list, highlighted_text: str) -> None:
-    """검색 결과를 DB에 저장. 동일 검색어가 있으면 덮어씀."""
+    """검색 결과를 DB에 저장. 영문·한글·약어 별칭도 같은 행에 저장."""
     try:
+        query_en, query_ko = _parse_alias(explanation)
         supabase.table("search_cache").upsert({
-            "query":            query.strip(),
-            "query_lower":      query.lower().strip(),
-            "explanation":      explanation,
+            "query":        query.strip(),
+            "query_lower":  query.lower().strip(),
+            "query_en":     query_en,
+            "query_ko":     query_ko,
+            "explanation":  explanation,
             "related_terms":    related_terms,
             "abbrev":           abbrev,
             "categories":       categories,
